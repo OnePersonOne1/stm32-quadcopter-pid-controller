@@ -25,7 +25,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "mpu6050.h"
+#include "string.h"
+#include "stdio.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -40,12 +42,18 @@
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
+#define MAX_MESSAGE_SIZE 256U
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+MPU6050_t MPU6050;
+uint8_t rxBuffer[1];  // Single character buffer
+uint8_t messageBuffer[MAX_MESSAGE_SIZE];  // Complete message buffer
+uint16_t messageIndex = 0;  // Current position in message
+uint8_t messageComplete = 0;  // Flag indicating complete message
+double roll, pitch, yaw;        // IMU angle
 
 /* USER CODE END PV */
 
@@ -57,6 +65,49 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+typedef struct {
+    double kp, ki, kd;
+    double i_term;
+    double prev_err;
+} PID_t;
+// need experiment
+static PID_t pidRoll  = { 3.0, 0.0, 30.0, 0.0, 0.0 };
+static PID_t pidPitch = { 3.0, 0.0, 30.0, 0.0, 0.0 };
+static PID_t pidYaw   = { 1.0, 0.0,  0.0, 0.0, 0.0 };
+
+// sp: target, mv: sensor state(current)
+static inline double pid_update(PID_t *p, double sp, double mv, double dt)
+{
+    double err = sp - mv;
+    p->i_term += p->ki * err * dt;
+    double d   = p->kd * (err - p->prev_err) / dt;
+    p->prev_err = err;
+    return p->kp * err + p->i_term + d;
+}
+
+/* PSC = 720-1, ARR = 1000-1 */
+static inline void setMotorDuty(uint8_t channel, double dutyPercent)
+/*
+    channel: 0‥3 (CH1..CH4)
+    dutyPercent: 0.0 – 100.0 (%)
+*/
+{
+    if (dutyPercent < 0.0)   dutyPercent = 0.0;
+    if (dutyPercent > 100.0) dutyPercent = 100.0;
+
+    /* total ticks per period = ARR + 1 */
+    uint16_t periodTicks = TIM1->ARR + 1;
+    uint16_t ccrValue    = (uint16_t)((dutyPercent / 100.0) * periodTicks);
+
+    switch (channel)
+    {
+        case 0: TIM1->CCR1 = ccrValue; break;   /* PA8  */
+        case 1: TIM1->CCR2 = ccrValue; break;   /* PA9  */
+        case 2: TIM1->CCR3 = ccrValue; break;   /* PA10 */
+        default:TIM1->CCR4 = ccrValue; break;   /* PA11 */
+    }
+}
+
 
 /* USER CODE END 0 */
 
@@ -93,6 +144,19 @@ int main(void)
   MX_TIM1_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
+
+  while (MPU6050_Init(&hi2c2) == 1);
+
+  // Start UART reception in interrupt mode (single character)
+  HAL_UART_Receive_IT(&huart2, rxBuffer, 1);
+  
+  // Send welcome message
+  char welcomeMsg[] = "UART2 Interrupt Ready!\r\n";
+  HAL_UART_Transmit(&huart2, (uint8_t*)welcomeMsg, strlen(welcomeMsg), HAL_MAX_DELAY);
 
   /* USER CODE END 2 */
 
@@ -103,6 +167,35 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    static uint32_t tick_prev = 0; // Thus static, only once called
+    uint32_t tick_now = HAL_GetTick();          /* milliseconds */
+    double dt = (tick_now - tick_prev) * 0.001; /* seconds      */
+    if (dt < 0.001) dt = 0.001;                 /* clamp to 1 ms */
+    tick_prev = tick_now;
+
+    /* 1. Read raw sensors (driver also updates Kalman angles) */
+    MPU6050_Read_All(&hi2c2, &MPU6050);
+
+    double roll  = MPU6050.KalmanAngleX;   /* deg, double */
+    double pitch = MPU6050.KalmanAngleY;   /* deg, double */
+    static double yaw = 0.0;         /* yaw from gyro integration */
+    yaw += MPU6050.Gz * dt;          /* Gz: deg/s */
+
+    /* 2. PID computation (target: level = 0°) */
+    double uRoll  = pid_update(&pidRoll , 0.0, roll , dt);
+    double uPitch = pid_update(&pidPitch, 0.0, pitch, dt);
+    double uYaw   = pid_update(&pidYaw , 0.0, yaw  , dt);
+
+    /* 3. Mixer: +X quad (FL, FR, RR, RL) */
+    double baseDuty = 45.0; // %
+
+    setMotorDuty(0, baseDuty + uPitch - uRoll + uYaw); /* Motor 1 (PA8)  */
+    setMotorDuty(1, baseDuty + uPitch + uRoll - uYaw); /* Motor 2 (PA9)  */
+    setMotorDuty(2, baseDuty - uPitch + uRoll + uYaw); /* Motor 3 (PA10) */
+    setMotorDuty(3, baseDuty - uPitch - uRoll - uYaw); /* Motor 4 (PA11) */
+
+    /* 4. Loop timing: 1 kHz */
+    HAL_Delay(1);
   }
   /* USER CODE END 3 */
 }
