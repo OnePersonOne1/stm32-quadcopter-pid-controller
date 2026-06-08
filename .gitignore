@@ -6,3 +6,10 @@ build/
 cmake/stm32cubemx/cmake_install.cmake
 cmake_install.cmake
 compile_commands.json
+
+# Archive backup (redundant snapshot, near GitHub 100MB limit)
+*.zip
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db

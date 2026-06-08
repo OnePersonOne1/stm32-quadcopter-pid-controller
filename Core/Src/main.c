@@ -42,18 +42,32 @@
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-#define MAX_MESSAGE_SIZE 256U
+
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
 MPU6050_t MPU6050;
+
 uint8_t rxBuffer[1];  // Single character buffer
-uint8_t messageBuffer[MAX_MESSAGE_SIZE];  // Complete message buffer
+uint8_t transmitBuffer[64];  // Complete message buffer
 uint16_t messageIndex = 0;  // Current position in message
 uint8_t messageComplete = 0;  // Flag indicating complete message
-double roll, pitch, yaw;        // IMU angle
+uint8_t messageBuffer[MAX_MESSAGE_SIZE];
+
+double roll = 0;
+double pitch = 0;
+double yaw = 0;        // IMU angle
+
+uint16_t ccrValue = 0;
+uint32_t tick_prev = 0;
+
+double uRoll = 0;
+double uPitch = 0;
+double uYaw = 0;
+double baseDuty = 0;
+int flag = 4; // 4: mode1, 0~1: motor, 5: pid
 
 /* USER CODE END PV */
 
@@ -71,9 +85,9 @@ typedef struct {
     double prev_err;
 } PID_t;
 // need experiment
-static PID_t pidRoll  = { 3.0, 0.0, 30.0, 0.0, 0.0 };
-static PID_t pidPitch = { 3.0, 0.0, 30.0, 0.0, 0.0 };
-static PID_t pidYaw   = { 1.0, 0.0,  0.0, 0.0, 0.0 };
+static PID_t pidRoll  = { 1.0, 0.0, 20.0, 0.0, 0.0 }; // you need to adjust gain
+static PID_t pidPitch = { 1.0, 0.0, 20.0, 0.0, 0.0 };
+static PID_t pidYaw   = { 1.0, 0.0, 0.0, 0.0, 0.0 };
 
 // sp: target, mv: sensor state(current)
 static inline double pid_update(PID_t *p, double sp, double mv, double dt)
@@ -92,12 +106,12 @@ static inline void setMotorDuty(uint8_t channel, double dutyPercent)
     dutyPercent: 0.0 – 100.0 (%)
 */
 {
-    if (dutyPercent < 0.0)   dutyPercent = 0.0;
+    if (dutyPercent < 0.0) dutyPercent = 0.0;
     if (dutyPercent > 100.0) dutyPercent = 100.0;
 
     /* total ticks per period = ARR + 1 */
     uint16_t periodTicks = TIM1->ARR + 1;
-    uint16_t ccrValue    = (uint16_t)((dutyPercent / 100.0) * periodTicks);
+    ccrValue = (uint16_t)((dutyPercent / 100.0) * periodTicks);
 
     switch (channel)
     {
@@ -119,14 +133,13 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-
+  int i = 0;
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
-
   /* USER CODE BEGIN Init */
 
   /* USER CODE END Init */
@@ -149,7 +162,7 @@ int main(void)
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
 
-  while (MPU6050_Init(&hi2c2) == 1);
+  // while (MPU6050_Init(&hi2c2) == 1);
 
   // Start UART reception in interrupt mode (single character)
   HAL_UART_Receive_IT(&huart2, rxBuffer, 1);
@@ -167,38 +180,102 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    static uint32_t tick_prev = 0; // Thus static, only once called
-    uint32_t tick_now = HAL_GetTick();          /* milliseconds */
+
+    // Thus static, only once called
+    uint32_t tick_now = HAL_GetTick(); /* milliseconds */
     double dt = (tick_now - tick_prev) * 0.001; /* seconds      */
-    if (dt < 0.001) dt = 0.001;                 /* clamp to 1 ms */
     tick_prev = tick_now;
 
     /* 1. Read raw sensors (driver also updates Kalman angles) */
     MPU6050_Read_All(&hi2c2, &MPU6050);
 
-    double roll  = MPU6050.KalmanAngleX;   /* deg, double */
-    double pitch = MPU6050.KalmanAngleY;   /* deg, double */
-    static double yaw = 0.0;         /* yaw from gyro integration */
-    yaw += MPU6050.Gz * dt;          /* Gz: deg/s */
+    yaw = MPU6050.KalmanAngleX;   /* deg, double */
+    pitch = MPU6050.KalmanAngleY;  /* deg, double, you need to +-90 'sometimes', depends on case */
+    roll += MPU6050.Gz * dt;          /* Gz: deg/s */
 
     /* 2. PID computation (target: level = 0°) */
-    double uRoll  = pid_update(&pidRoll , 0.0, roll , dt);
-    double uPitch = pid_update(&pidPitch, 0.0, pitch, dt);
-    double uYaw   = pid_update(&pidYaw , 0.0, yaw  , dt);
+    uRoll = pid_update(&pidRoll, 0.0, roll , dt);
+    uPitch = pid_update(&pidPitch, 0.0, pitch, dt);
+    uYaw = pid_update(&pidYaw , 0.0, yaw , dt);
 
     /* 3. Mixer: +X quad (FL, FR, RR, RL) */
-    double baseDuty = 45.0; // %
+    /* AP001, 0: RL(cw), 1: FR(cw), 2: RR(ccw), 3: FL(ccw) */
+    /* AP003, 0: RR(ccw), 1: FR(Cw), 2: RL(cw), 3: FL(ccw) */
+    // setMotorDuty(0, baseDuty + uPitch - uRoll + uYaw); /* Motor 1 (PA8)  */
+    // setMotorDuty(0, 0); // answer
+    // setMotorDuty(0, 0);
 
-    setMotorDuty(0, baseDuty + uPitch - uRoll + uYaw); /* Motor 1 (PA8)  */
-    setMotorDuty(1, baseDuty + uPitch + uRoll - uYaw); /* Motor 2 (PA9)  */
-    setMotorDuty(2, baseDuty - uPitch + uRoll + uYaw); /* Motor 3 (PA10) */
-    setMotorDuty(3, baseDuty - uPitch - uRoll - uYaw); /* Motor 4 (PA11) */
+    // setMotorDuty(1, baseDuty + uPitch + uRoll - uYaw); /* Motor 2 (PA9)  */
+    // setMotorDuty(1, baseDuty + uPitch + uRoll - uYaw);
+    // setMotorDuty(1, 0);
+    // setMotorDuty(2, baseDuty - uPitch + uRoll + uYaw); /* Motor 3 (PA10) */
+    // setMotorDuty(2, baseDuty - uPitch - uRoll - uYaw);
+    // setMotorDuty(2, baseDuty);
+    // setMotorDuty(3, baseDuty - uPitch - uRoll - uYaw); /* Motor 4 (PA11) */
+    // setMotorDuty(3, baseDuty - uPitch + uRoll + uYaw);
+    // setMotorDuty(3, 0);
 
+    if(flag == 4) {
+        setMotorDuty(0, baseDuty); 
+        setMotorDuty(1, baseDuty);
+        setMotorDuty(2, baseDuty);
+        setMotorDuty(3, baseDuty);
+    } else if(flag == 5){
+        setMotorDuty(0, baseDuty + uPitch + uRoll - uYaw);   // Rear-Left  (CW)
+        setMotorDuty(1, baseDuty - uPitch - uRoll - uYaw);   // Front-Right(CW)
+        setMotorDuty(2, baseDuty + uPitch - uRoll + uYaw);   // Rear-Right (CCW)
+        setMotorDuty(3, baseDuty - uPitch + uRoll + uYaw);   // Front-Left (CCW)
+    } else if(flag == 0){
+        setMotorDuty(0, baseDuty + uPitch + uRoll - uYaw);   // Rear-Left  (CW)
+        setMotorDuty(1, 0);
+        setMotorDuty(2, 0);
+        setMotorDuty(3, 0);
+    } else if(flag == 1){
+        setMotorDuty(0, 0);
+        setMotorDuty(1, baseDuty - uPitch - uRoll - uYaw);   // Front-Right(CW)
+        setMotorDuty(2, 0);
+        setMotorDuty(3, 0);
+    } else if(flag == 2){
+        setMotorDuty(0, 0);
+        setMotorDuty(1, 0);
+        setMotorDuty(2, baseDuty + uPitch - uRoll + uYaw);   // Rear-Right (CCW)
+        setMotorDuty(3, 0);
+    } else if(flag == 3){
+        setMotorDuty(0, 0);
+        setMotorDuty(1, 0);
+        setMotorDuty(2, 0);
+        setMotorDuty(3, baseDuty - uPitch + uRoll + uYaw);   // Front-Left (CCW)
+    }
+    
     /* 4. Loop timing: 1 kHz */
-    HAL_Delay(1);
+    if (i == 10) {
+      uint16_t m0 = TIM1->CCR1;
+      uint16_t m1 = TIM1->CCR2;
+      uint16_t m2 = TIM1->CCR3;
+      uint16_t m3 = TIM1->CCR4;
+
+      sprintf((char*)transmitBuffer, "R:%d, P:%d, Y:%d, M:[%u,%u,%u,%u]\r\n",
+                      (int)roll, (int)pitch, (int)yaw,
+                      m0, m1, m2, m3);
+      HAL_UART_Transmit(&huart2, transmitBuffer, strlen(transmitBuffer), 100);
+      memset(transmitBuffer, 0, sizeof(transmitBuffer));
+
+      i = 0;
+    }
+
+    ++i;
+    HAL_Delay(10);
   }
   /* USER CODE END 3 */
 }
+
+/*     sprintf((char*)messageBuffer, "R:%d, P:%d, Y:%d, M:[%u,%u,%u,%u]\r\n",
+                      (int)roll, (int)pitch, (int)yaw,
+                      m0, m1, m2, m3);
+    HAL_UART_Transmit(&huart2, messageBuffer, strlen(messageBuffer), 100);
+    memset(messageBuffer, 0, sizeof(messageBuffer));
+
+*/
 
 /**
   * @brief System Clock Configuration

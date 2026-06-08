@@ -19,9 +19,19 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "usart.h"
+#include "main.h"
 
 /* USER CODE BEGIN 0 */
+extern uint8_t rxBuffer[1];
+extern uint8_t messageBuffer[MAX_MESSAGE_SIZE];
+extern uint16_t messageIndex;
+extern uint8_t messageComplete;
 
+extern double roll;
+extern double yaw;
+extern double pitch;
+extern double baseDuty;
+extern int flag;
 /* USER CODE END 0 */
 
 UART_HandleTypeDef huart2;
@@ -118,5 +128,90 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
 }
 
 /* USER CODE BEGIN 1 */
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance == USART2)
+  {
+    uint8_t receivedChar = rxBuffer[0];
+    
+    // Check for end of message (CR, LF, or both)
+    if (receivedChar == '\r' || receivedChar == '\n')
+    {
+      if (messageIndex > 0)  // Only process if we have data
+      {
+        messageBuffer[messageIndex] = '\0';  // Null terminate
+        messageComplete = 1;  // Signal main loop
+        
+        // Echo the complete message
+        char response[100];
+        snprintf(response, sizeof(response), "received: %s\r\n", messageBuffer);
+        HAL_UART_Transmit(&huart2, (uint8_t*)response, strlen(response), 100);
+
+      if (strcmp(messageBuffer, "reset") == 0) {
+        roll = 0;
+        // pitch = 0; // useless
+        // yaw = 0;
+        HAL_UART_Transmit(&huart2, (uint8_t*)"status reset\r\n", 12, 100);
+      } else if (strcmp(messageBuffer, "0") == 0) {
+        baseDuty = 0; // 'sometimes' it has problem, similarity with NULL \0
+        HAL_UART_Transmit(&huart2, (uint8_t*)"thrust 0\r\n", 10, 100);
+      } else if (strcmp(messageBuffer, "25") == 0) {
+        baseDuty = 25;
+        HAL_UART_Transmit(&huart2, (uint8_t*)"thrust 25\r\n", 11, 100);
+      } else if (strcmp(messageBuffer, "50") == 0) {
+        baseDuty = 50;
+        HAL_UART_Transmit(&huart2, (uint8_t*)"thrust 50\r\n", 11, 100);
+      } else if (strcmp(messageBuffer, "75") == 0) {
+        baseDuty = 75;
+        HAL_UART_Transmit(&huart2, (uint8_t*)"thrust 75\r\n", 11, 100);
+      } else if (strcmp(messageBuffer, "100") == 0) {
+        baseDuty = 100;
+        HAL_UART_Transmit(&huart2, (uint8_t*)"thrust 100\r\n", 12, 100);
+      } else if (strcmp(messageBuffer, "mode1") == 0) {
+        flag = 4;
+        HAL_UART_Transmit(&huart2, (uint8_t*)"set mode 1\r\n", 12, 100);
+      } else if (strcmp(messageBuffer, "pid") == 0) {
+        flag = 5;
+        HAL_UART_Transmit(&huart2, (uint8_t*)"pid mode\r\n", 10, 100);
+      } else if (strcmp(messageBuffer, "m0") == 0) {
+        flag = 0;
+        HAL_UART_Transmit(&huart2, (uint8_t*)"motor 0\r\n", 9, 100);
+      } else if (strcmp(messageBuffer, "m1") == 0) {
+        flag = 1;
+        HAL_UART_Transmit(&huart2, (uint8_t*)"motor 1\r\n", 9, 100);
+      } else if (strcmp(messageBuffer, "m2") == 0) {
+        flag = 2;
+        HAL_UART_Transmit(&huart2, (uint8_t*)"motor 2\r\n", 9, 100);
+      } else if (strcmp(messageBuffer, "m3") == 0) {
+        flag = 3;
+        HAL_UART_Transmit(&huart2, (uint8_t*)"motor 3\r\n", 9, 100);
+      } // it is too slow, because too heavy
+      // Reset for next message
+        messageIndex = 0;
+      }
+    }
+    else if (messageIndex < MAX_MESSAGE_SIZE - 1)  // Prevent buffer overflow
+    {
+      messageBuffer[messageIndex++] = receivedChar;
+    }
+    
+    // Restart reception for next character
+    HAL_UART_Receive_IT(&huart2, rxBuffer, 1);
+  }
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+  if (huart->Instance == USART2)
+  {
+    // Reset message state on error
+    messageIndex = 0;
+    messageComplete = 0;
+    
+    // Restart reception
+    HAL_UART_Receive_IT(&huart2, rxBuffer, 1);
+  }
+}
 
 /* USER CODE END 1 */
